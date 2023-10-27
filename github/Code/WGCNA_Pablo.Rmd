@@ -1,0 +1,306 @@
+---
+WGCNA Fibroblasts in senescence
+---
+
+#Choose working directory
+
+# Set up environment
+```{r}
+#clear workspace and set string as factors to false
+rm(list=ls())
+options(stringsAsFactors = F)
+
+```
+
+
+load packages
+```{r}
+library(openxlsx)
+library(readxl)
+library(WGCNA)
+library(rstudioapi)
+library(dplyr)
+library(RCy3)
+library(readr)
+```
+
+```{r}
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+```
+
+# read data and combine them to input file for WGCNA
+```{r}
+data <- read.xlsx("Merged_data.xlsx")
+names(data)
+rownames(data) <- data$Ensembl_GeneID
+data <- data[, -c(1:6)]
+# Obtén los nombres de las columnas que comienzan con "MRC"
+selected_columns <- names(data)[grepl("^HFF", names(data))]
+
+# Crea un nuevo data frame con solo las columnas seleccionadas
+data <- data[, selected_columns]
+head(data)
+
+```
+
+# check if there are samples with missing data
+```{r}
+gsg = goodSamplesGenes(data, verbose = 3);
+gsg$allOK
+
+# normalized counts from RNA-seq data should be log-transformed
+data.log <- log2(data+1)
+data.log$sum <- rowSums(data.log)
+data.log <- data.log[data.log$sum > 0.5,]
+data.log <- as.data.frame(t(data.log))
+```
+
+
+```{r}
+traitData = read.table("Senescence_SampleData_.txt", header=TRUE);
+
+data.filtered = data.log[row.names(data.log) %in% traitData$SampleID,]
+colnames(data.filtered)
+
+# Form a data frame analogous to expression data that will hold the clinical traits.
+samples = rownames(data.filtered);
+traitRows = match(samples, traitData$SampleID);
+#datTraits = traitData[traitData$SampleID %in% samples, "Senescence", drop=FALSE]
+datTraits = traitData[traitRows, -1];
+rownames(datTraits) = traitData[traitData$SampleID %in% samples, "SampleID"]
+
+datTraits$Senescence <- as.numeric(datTraits$Senescence)
+datTraits$Cell_Type <- as.numeric(datTraits$Cell_Type)
+
+collectGarbage();
+```
+
+#merge together the filtered table with the information from the dataset
+```{r}
+# Cluster samples
+sampleTree = hclust(dist(data.filtered), method = "average")
+
+# Convert traits to a color representation: white means low, red means high, grey means missing entry
+traitColors = numbers2colors(datTraits, signed = FALSE);
+sizeGrWindow(12,12)
+
+# Plot the sample dendrogram and the colors underneath.
+plotDendroAndColors(sampleTree, traitColors,
+                    groupLabels = names(datTraits), cex.dendroLabels = 0.5, 
+                    main = "Sample dendrogram and trait heatmap")
+```
+
+```{r}
+save(data.filtered, datTraits, file = "WGCNA-input.RData")
+```
+
+
+#########################################
+Network construction and module detection
+#########################################
+
+```{r}
+# Allow multi-threading within WGCNA. This helps speed up certain calculations.
+# At present this call is necessary for the code to work.
+# Any error here may be ignored but you may want to update WGCNA if you see one.
+# Caution: skip this line if you run RStudio or other third-party R environments. 
+# See note above.
+#enableWGCNAThreads()
+# Load the data saved in the first part
+lnames = load(file = "WGCNA-input.RData");
+#The variable lnames contains the names of loaded variables.
+lnames
+```
+
+```{r}
+# Choose a set of soft-thresholding powers
+powers = seq(1,15, by=2)
+
+# Call the network topology analysis function
+sft = pickSoftThreshold(data.filtered, powerVector = powers, verbose = 5)
+
+save(sft, file = "WGCNA-sft.RData")
+
+# Plot the results:
+sizeGrWindow(9, 5)
+par(mfrow = c(1,2));
+cex1 = 0.9;
+
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2], xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n", main = paste("Scale independence"));
+
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2], labels=powers,cex=cex1,col="red");
+
+# this line corresponds to using an R^2 cut-off of h
+abline(h=0.80,col="red")
+
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], sft$fitIndices[,5], xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n", main = paste("Mean connectivity"))
+
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+```
+
+```{r}
+# looking at both - soft threshold and mean connectivity 
+# I decided to go with power 6 for this small example dataset
+net = blockwiseModules(data.filtered, power = 6,
+                       TOMType = "unsigned", minModuleSize = 30,
+                       reassignThreshold = 0, mergeCutHeight = 0.25,
+                       numericLabels = TRUE, pamRespectsDendro = FALSE,
+                       saveTOMs = TRUE,
+                       saveTOMFileBase = "expTOM", 
+                       verbose = 3)
+
+save(net, file = "WGCNA-net.RData")
+
+```
+
+
+```{r}
+# open a graphics window
+sizeGrWindow(15, 9)
+# Convert labels to colors for plotting
+mergedColors = labels2colors(net$colors)
+# Plot the dendrogram and the module colors underneath
+plotDendroAndColors(net$dendrograms[[1]], mergedColors[net$blockGenes[[1]]],
+                    "Module colors",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+```
+
+```{r}
+moduleLabels = net$colors
+moduleColors = labels2colors(net$colors)
+table(moduleColors)
+MEs = net$MEs;
+geneTree = net$dendrograms[[1]];
+save(MEs, moduleLabels, moduleColors, geneTree, file = "network-reconstruction.RData")
+```
+
+
+
+##########################################
+Relate modules to external clinical traits
+##########################################
+
+```{r}
+# Load the expression and trait data saved in the first part
+load(file = "WGCNA-input.RData");
+
+# Load network data saved in the second part.
+#load(file = "network-reconstruction.RData");
+```
+
+```{r}
+# Define numbers of genes and samples
+nGenes = ncol(data.filtered);
+nSamples = nrow(data.filtered);
+# Recalculate MEs with color labels
+MEs0 = moduleEigengenes(data.filtered, moduleColors)$eigengenes
+MEs = orderMEs(MEs0)
+moduleTraitCor = cor(MEs, datTraits, use = "p");
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples);
+```
+
+```{r}
+sizeGrWindow(20,20)
+# Will display correlations and their p-values
+textMatrix =  paste(signif(moduleTraitCor, 2), "\n(",
+                           signif(moduleTraitPvalue, 1), ")", sep ="");
+dim(textMatrix) = dim(moduleTraitCor)
+par(mar = c(8, 8.5, 3, 3));
+
+# Display the correlation values within a heatmap plot
+labeledHeatmap(Matrix = moduleTraitCor,
+               xLabels = names(datTraits),
+               yLabels = names(MEs),
+               ySymbols = names(MEs),
+               colorLabels = FALSE,
+               colors = blueWhiteRed(50),
+               textMatrix = textMatrix,
+               setStdMargins = FALSE,
+               cex.text = 0.3,
+               cex.lab.y = 0.5,
+               zlim = c(-1,1),
+               main = paste("Module-trait relationships"))
+```
+
+
+
+En la representación, si es neg, es que se va reduciendo, cuanto más severa pues más neg, y así.
+```{r}
+# Define variable time containing the time column of datTrait
+Senescence = as.data.frame(datTraits$Senescence);
+names(Senescence) = "Senescence"
+# names (colors) of the modules
+modNames = substring(names(MEs), 3)
+
+geneModuleMembership = as.data.frame(cor(data.filtered, MEs, use = "p"));
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples));
+
+names(geneModuleMembership) = paste("MM", modNames, sep="");
+names(MMPvalue) = paste("p.MM", modNames, sep="");
+
+geneTraitSignificance = as.data.frame(cor(data.filtered, Senescence, use = "p"));
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples));
+
+names(geneTraitSignificance) = paste("GS.", names(Senescence), sep="");
+names(GSPvalue) = paste("p.GS.", names(Senescence), sep="");
+names(geneTraitSignificance)
+names(GSPvalue)
+```
+
+```{r}
+modules = c("brown","red","black")
+sizeGrWindow(9, 3);
+  par(mfrow = c(1,3));
+for(module in modules) {
+  column = match(module, modNames);
+  moduleGenes = moduleColors==module;
+  
+  verboseScatterplot(abs(geneModuleMembership[moduleGenes, column]),
+                     abs(geneTraitSignificance[moduleGenes, 1]),
+                     xlab = paste("Module membership (MM,", module, ")", sep=""),
+                     ylab = "Gene significance (GS) for disease",
+                     main = paste("MM vs. GS\n"),
+                     cex.main = 1.2, cex.lab = 1.2, cex.axis = 1.2, col = module)
+}
+```
+
+```{r}
+# Change column names
+names(geneTraitSignificance) = "GS_Senescence"
+names(GSPvalue) = "p.GS_Senescence"
+
+
+# Create the starting data frame
+geneInfo0 = data.frame(Gene.ID = colnames(data.filtered),
+                      moduleColor = moduleColors,
+                      geneTraitSignificance,
+                      GSPvalue)
+
+# Order modules by their significance for time
+modOrder = order(-abs(cor(MEs, Senescence, use = "p")));
+
+# Add module membership information in the chosen order
+for (mod in 1:ncol(geneModuleMembership))
+{
+  oldNames = names(geneInfo0)
+  geneInfo0 = data.frame(geneInfo0, geneModuleMembership[, modOrder[mod]], 
+                         MMPvalue[, modOrder[mod]]);
+  names(geneInfo0) = c(oldNames, paste("MM.", modNames[modOrder[mod]], sep=""),
+                       paste("p.MM.", modNames[modOrder[mod]], sep=""))
+}
+# Order the genes in the geneInfo variable first by module color, then by geneTraitSignificance
+#"GS.senescence" %in% colnames(geneInfo0)
+
+geneInfo0$GS_Senescence <- as.numeric(as.character(geneInfo0$GS_Senescence))
+
+geneOrder = order(geneInfo0$moduleColor, -abs(geneInfo0$GS_Senescence));
+geneInfo = geneInfo0[geneOrder, ]
+```
+
+```{r}
+write.csv(geneInfo, file = "geneInfo.csv", row.names = FALSE)
+```
+
