@@ -12,4 +12,5 @@ pip install -r requirements.txt
 ```
 ## Usage
 Load PPI_Pablo.cys into Cytoscape for PPI visualization.
+
 Run the provided scripts for network analysis.
